@@ -1,6 +1,7 @@
 from functools import wraps
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import create_access_token, get_jwt, jwt_required
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from .extensions import db
 from .models import User
@@ -12,6 +13,9 @@ def body_fields(*fields):
     data = request.get_json(silent=True) or {}
     missing = [field for field in fields if not str(data.get(field, "")).strip()]
     return data, missing
+
+
+def normalize_email(value): return str(value).strip().lower()
 
 
 def admin_required(function):
@@ -28,31 +32,28 @@ def admin_required(function):
 def bootstrap_admin():
     if db.session.execute(db.select(User.id).limit(1)).first():
         return jsonify(error="O administrador inicial já foi cadastrado."), 409
-    data, missing = body_fields("name", "password")
-    if missing:
-        return jsonify(error="Nome e senha são obrigatórios."), 400
+    data, missing = body_fields("name", "email", "password")
+    if missing: return jsonify(error="Nome, e-mail e senha são obrigatórios."), 400
     if len(data["password"]) < 8:
         return jsonify(error="A senha deve possuir pelo menos 8 caracteres."), 400
-    user = User(name=data["name"].strip(), role="ADMIN")
+    user = User(name=data["name"].strip(), email=normalize_email(data["email"]), role="ADMIN")
     user.set_password(data["password"])
     db.session.add(user)
-    try:
-        db.session.commit()
+    try: db.session.commit()
     except IntegrityError:
         db.session.rollback()
-        return jsonify(error="Nome de usuário já utilizado."), 409
+        return jsonify(error="E-mail já utilizado."), 409
     return jsonify(user=user.to_dict()), 201
 
 
 @auth_bp.post("/login")
 def login():
-    data, missing = body_fields("name", "password")
-    if missing:
-        return jsonify(error="Nome e senha são obrigatórios."), 400
-    user = db.session.scalar(db.select(User).where(User.name == data["name"].strip()))
+    data, missing = body_fields("email", "password")
+    if missing: return jsonify(error="E-mail e senha são obrigatórios."), 400
+    user = db.session.scalar(db.select(User).where(
+        func.lower(User.email) == normalize_email(data["email"])))
     if not user or not user.active or not user.check_password(data["password"]):
-        return jsonify(error="Usuário ou senha inválidos."), 401
+        return jsonify(error="E-mail ou senha inválidos."), 401
     token = create_access_token(identity=str(user.id),
-                                additional_claims={"role": user.role})
+                                additional_claims={"role": user.role, "shift": user.shift})
     return jsonify(accessToken=token, user=user.to_dict())
-
