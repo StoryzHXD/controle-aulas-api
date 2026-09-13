@@ -1,8 +1,8 @@
 from datetime import date, datetime, time, timezone
+from zoneinfo import ZoneInfo
 
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import (
-    get_jwt,
     get_jwt_identity,
     jwt_required,
 )
@@ -31,56 +31,77 @@ api_bp = Blueprint(
     url_prefix="/api",
 )
 
+APP_TIMEZONE = ZoneInfo("America/Sao_Paulo")
 
-def current_school_id():
-    """
-    Obtém o ID da escola armazenado no JWT.
-    """
-    school_id = get_jwt().get("school_id")
 
-    try:
-        return int(school_id)
-    except (TypeError, ValueError):
-        return None
+def local_now():
+    return datetime.now(APP_TIMEZONE)
 
+
+def local_today():
+    return local_now().date()
+
+
+def scheduling_window_is_open(moment=None):
+    moment = moment or local_now()
+    weekday = moment.weekday()
+
+    # Python:
+    # segunda = 0
+    # sexta = 4
+    # sábado = 5
+    # domingo = 6
+
+    if weekday == 5:
+        return False
+
+    if weekday == 6:
+        opening_time = time(
+            hour=0,
+            minute=1
+        )
+
+        return moment.time().replace(
+            tzinfo=None
+        ) >= opening_time
+
+    return True
+
+
+def is_school_day(class_date):
+    return class_date.weekday() in range(0, 5)
 
 def current_user():
-    """
-    Retorna o usuário autenticado somente se ele pertencer
-    à escola presente no JWT.
-    """
     try:
         user_id = int(get_jwt_identity())
     except (TypeError, ValueError):
         return None
 
-    school_id = current_school_id()
+    return db.session.get(User, user_id)
 
-    if school_id is None:
+
+def current_owner_id(user=None):
+    user = user or current_user()
+
+    if user is None:
         return None
 
-    return db.session.scalar(
-        db.select(User).where(
-            User.id == user_id,
-            User.school_id == school_id,
-        )
-    )
+    if user.role == "ADMIN":
+        return user.id
+
+    return user.father_id
 
 
-def find_in_school(model, item_id):
-    """
-    Busca um registro pelo ID, garantindo que pertença
-    à escola do usuário autenticado.
-    """
-    school_id = current_school_id()
+def find_for_owner(model, item_id, owner_id=None):
+    owner_id = owner_id or current_owner_id()
 
-    if school_id is None:
+    if owner_id is None:
         return None
 
     return db.session.scalar(
         db.select(model).where(
             model.id == item_id,
-            model.school_id == school_id,
+            model.father_id == owner_id,
         )
     )
 
@@ -89,19 +110,16 @@ def valid_shift(value):
     return str(value).strip().upper() in SHIFTS
 
 
-def notify(user_id, title, message):
-    """
-    Cria uma notificação vinculada à escola atual.
-    O commit é realizado pela função que chamou notify().
-    """
-    school_id = current_school_id()
+def invalid_session_response():
+    return jsonify(
+        error="Sessão inválida ou usuário sem administrador responsável."
+    ), 401
 
-    if school_id is None:
-        return
 
+def notify(owner_id, user_id, title, message):
     db.session.add(
         Notification(
-            school_id=school_id,
+            father_id=owner_id,
             user_id=user_id,
             title=title,
             message=message,
@@ -109,17 +127,11 @@ def notify(user_id, title, message):
     )
 
 
-def invalid_session_response():
-    return jsonify(
-        error="Sessão inválida ou sem escola vinculada."
-    ), 401
-
-
 @api_bp.get("/health")
 def health():
     return jsonify(
         status="ok",
-        version="3.0",
+        version="4.0",
     )
 
 
@@ -133,6 +145,9 @@ def me():
             error="Usuário inativo ou sessão inválida."
         ), 401
 
+    if current_owner_id(user) is None:
+        return invalid_session_response()
+
     return jsonify(
         user=user.to_dict()
     )
@@ -145,15 +160,12 @@ def me():
 @api_bp.get("/teachers")
 @admin_required
 def list_teachers():
-    school_id = current_school_id()
-
-    if school_id is None:
-        return invalid_session_response()
+    admin = current_user()
 
     items = db.session.scalars(
         db.select(User)
         .where(
-            User.school_id == school_id,
+            User.father_id == admin.id,
             User.role == "PROFESSOR",
         )
         .order_by(User.name)
@@ -167,10 +179,7 @@ def list_teachers():
 @api_bp.post("/teachers")
 @admin_required
 def create_teacher():
-    school_id = current_school_id()
-
-    if school_id is None:
-        return invalid_session_response()
+    admin = current_user()
 
     data, missing = body_fields(
         "name",
@@ -211,7 +220,7 @@ def create_teacher():
         ), 400
 
     teacher = User(
-        school_id=school_id,
+        father_id=admin.id,
         name=name,
         email=email,
         subject=subject,
@@ -221,7 +230,6 @@ def create_teacher():
     )
 
     teacher.set_password(password)
-
     db.session.add(teacher)
 
     try:
@@ -230,7 +238,7 @@ def create_teacher():
         db.session.rollback()
 
         return jsonify(
-            error="Este e-mail já está sendo usado nesta escola."
+            error="Este e-mail já está cadastrado."
         ), 409
 
     return jsonify(
@@ -241,9 +249,17 @@ def create_teacher():
 @api_bp.patch("/teachers/<int:teacher_id>")
 @admin_required
 def update_teacher(teacher_id):
-    teacher = find_in_school(User, teacher_id)
+    admin = current_user()
 
-    if teacher is None or teacher.role != "PROFESSOR":
+    teacher = db.session.scalar(
+        db.select(User).where(
+            User.id == teacher_id,
+            User.father_id == admin.id,
+            User.role == "PROFESSOR",
+        )
+    )
+
+    if teacher is None:
         return jsonify(
             error="Professor não encontrado."
         ), 404
@@ -309,7 +325,7 @@ def update_teacher(teacher_id):
         db.session.rollback()
 
         return jsonify(
-            error="Este e-mail já está sendo usado nesta escola."
+            error="Este e-mail já está cadastrado."
         ), 409
 
     return jsonify(
@@ -325,12 +341,17 @@ def update_teacher(teacher_id):
 @jwt_required()
 def list_rooms():
     user = current_user()
+    owner_id = current_owner_id(user)
 
-    if user is None or not user.active:
+    if (
+        user is None
+        or not user.active
+        or owner_id is None
+    ):
         return invalid_session_response()
 
     query = db.select(Room).where(
-        Room.school_id == user.school_id,
+        Room.father_id == owner_id,
         Room.active.is_(True),
     )
 
@@ -351,10 +372,7 @@ def list_rooms():
 @api_bp.post("/rooms")
 @admin_required
 def create_room():
-    school_id = current_school_id()
-
-    if school_id is None:
-        return invalid_session_response()
+    admin = current_user()
 
     data, missing = body_fields(
         "name",
@@ -397,7 +415,7 @@ def create_room():
         ), 400
 
     room = Room(
-        school_id=school_id,
+        father_id=admin.id,
         name=name,
         shift=shift,
         lesson_count=lesson_count,
@@ -412,7 +430,7 @@ def create_room():
         db.session.rollback()
 
         return jsonify(
-            error="Já existe uma sala com esse nome nesta escola."
+            error="Já existe uma sala com esse nome para este administrador."
         ), 409
 
     return jsonify(
@@ -423,7 +441,8 @@ def create_room():
 @api_bp.patch("/rooms/<int:room_id>")
 @admin_required
 def update_room(room_id):
-    room = find_in_school(Room, room_id)
+    admin = current_user()
+    room = find_for_owner(Room, room_id, admin.id)
 
     if room is None:
         return jsonify(
@@ -462,7 +481,7 @@ def update_room(room_id):
 
         if not 7 <= lesson_count <= 16:
             return jsonify(
-                error="Use uma quantidade de aulas entre 7 e 16."
+                error="Use uma quantidade entre 7 e 16."
             ), 400
 
         room.lesson_count = lesson_count
@@ -476,7 +495,7 @@ def update_room(room_id):
         db.session.rollback()
 
         return jsonify(
-            error="Já existe uma sala com esse nome nesta escola."
+            error="Já existe uma sala com esse nome."
         ), 409
 
     return jsonify(
@@ -492,11 +511,20 @@ def update_room(room_id):
 @jwt_required()
 def list_schedules(room_id):
     user = current_user()
+    owner_id = current_owner_id(user)
 
-    if user is None or not user.active:
+    if (
+        user is None
+        or not user.active
+        or owner_id is None
+    ):
         return invalid_session_response()
 
-    room = find_in_school(Room, room_id)
+    room = find_for_owner(
+        Room,
+        room_id,
+        owner_id,
+    )
 
     if room is None:
         return jsonify(
@@ -508,12 +536,12 @@ def list_schedules(room_id):
         and room.shift != user.shift
     ):
         return jsonify(
-            error="Você não possui acesso às salas de outro turno."
+            error="Sala pertencente a outro turno."
         ), 403
 
     start_value = request.args.get(
         "start",
-        date.today().isoformat(),
+        local_today().isoformat(),
     )
 
     end_value = request.args.get(
@@ -531,20 +559,20 @@ def list_schedules(room_id):
 
     if end_date < start_date:
         return jsonify(
-            error="A data final não pode ser anterior à data inicial."
+            error="A data final não pode ser anterior à inicial."
         ), 400
 
-    query = db.select(Schedule).where(
-        Schedule.school_id == user.school_id,
-        Schedule.room_id == room.id,
-        Schedule.class_date.between(
-            start_date,
-            end_date,
-        ),
-    )
-
     items = db.session.scalars(
-        query.order_by(
+        db.select(Schedule)
+        .where(
+            Schedule.father_id == owner_id,
+            Schedule.room_id == room.id,
+            Schedule.class_date.between(
+                start_date,
+                end_date,
+            ),
+        )
+        .order_by(
             Schedule.class_date,
             Schedule.lesson_number,
         )
@@ -555,21 +583,38 @@ def list_schedules(room_id):
         items=[item.to_dict() for item in items],
     )
 
-
 @api_bp.post("/rooms/<int:room_id>/schedules")
 @jwt_required()
 def create_schedule(room_id):
     user = current_user()
+    owner_id = current_owner_id(user)
 
-    if user is None or not user.active:
+    if (
+        user is None
+        or not user.active
+        or owner_id is None
+    ):
         return invalid_session_response()
 
     if user.role != "PROFESSOR":
         return jsonify(
-            error="Somente professores podem agendar aulas."
+            error="Somente professores podem agendar."
         ), 403
 
-    room = find_in_school(Room, room_id)
+    if not scheduling_window_is_open():
+        return jsonify(
+            error=(
+                "Novos agendamentos ficam indisponíveis "
+                "aos sábados e são liberados no domingo "
+                "a partir de 00:01."
+            )
+        ), 400
+
+    room = find_for_owner(
+        Room,
+        room_id,
+        owner_id,
+    )
 
     if room is None or not room.active:
         return jsonify(
@@ -610,18 +655,44 @@ def create_schedule(room_id):
             error="Dados de agendamento inválidos."
         ), 400
 
-    if class_date < date.today():
+    if not is_school_day(class_date):
         return jsonify(
-            error="Não é possível agendar uma aula em uma data passada."
+            error=(
+                "As aulas só podem ser agendadas "
+                "de segunda a sexta-feira."
+            )
         ), 400
+
+    now = local_now()
+    today = now.date()
+
+    if class_date < today:
+        return jsonify(
+            error="Não é possível agendar uma data passada."
+        ), 400
+
+    if class_date == today:
+        scheduled_moment = datetime.combine(
+            class_date,
+            class_time,
+            tzinfo=APP_TIMEZONE,
+        )
+
+        if scheduled_moment <= now:
+            return jsonify(
+                error=(
+                    "Este horário já passou e não pode "
+                    "mais ser agendado."
+                )
+            ), 400
 
     if not 1 <= lesson_number <= room.lesson_count:
         return jsonify(
-            error="Número de aula inválido para esta sala."
+            error="Número de aula inválido."
         ), 400
 
     schedule = Schedule(
-        school_id=user.school_id,
+        father_id=owner_id,
         room_id=room.id,
         teacher_id=user.id,
         class_date=class_date,
@@ -635,27 +706,19 @@ def create_schedule(room_id):
     try:
         db.session.flush()
 
-        admins = db.session.scalars(
-            db.select(User).where(
-                User.school_id == user.school_id,
-                User.role == "ADMIN",
-                User.active.is_(True),
-            )
-        ).all()
-
-        for admin in admins:
-            notify(
-                admin.id,
-                "Nova aula agendada",
-                (
-                    f"{user.name} agendou a sala "
-                    f"{room.name} para {class_date.strftime('%d/%m/%Y')} "
-                    f"às {class_time.strftime('%H:%M')}."
-                ),
-            )
+        notify(
+            owner_id=owner_id,
+            user_id=owner_id,
+            title="Nova aula agendada",
+            message=(
+                f"{user.name} agendou a sala "
+                f"{room.name} para "
+                f"{class_date.strftime('%d/%m/%Y')} "
+                f"às {class_time.strftime('%H:%M')}."
+            ),
+        )
 
         db.session.commit()
-
     except IntegrityError:
         db.session.rollback()
 
@@ -667,13 +730,15 @@ def create_schedule(room_id):
         schedule=schedule.to_dict()
     ), 201
 
-
 @api_bp.patch("/schedules/<int:schedule_id>/status")
 @admin_required
 def update_schedule_status(schedule_id):
-    schedule = find_in_school(
+    admin = current_user()
+
+    schedule = find_for_owner(
         Schedule,
         schedule_id,
+        admin.id,
     )
 
     if schedule is None:
@@ -682,7 +747,9 @@ def update_schedule_status(schedule_id):
         ), 404
 
     data = request.get_json(silent=True) or {}
-    status = str(data.get("status", "")).strip().upper()
+    status = str(
+        data.get("status", "")
+    ).strip().upper()
 
     if status not in SCHEDULE_STATUSES:
         return jsonify(
@@ -692,10 +759,7 @@ def update_schedule_status(schedule_id):
     schedule.status = status
 
     if status == "CANCELADA":
-        schedule.cancelled_by_id = int(
-            get_jwt_identity()
-        )
-
+        schedule.cancelled_by_id = admin.id
         schedule.cancelled_at = datetime.now(
             timezone.utc
         )
@@ -704,10 +768,11 @@ def update_schedule_status(schedule_id):
         schedule.cancelled_at = None
 
     notify(
-        schedule.teacher_id,
-        "Status da aula alterado",
-        (
-            f"A aula na sala {schedule.room.name} "
+        owner_id=admin.id,
+        user_id=schedule.teacher_id,
+        title="Status da aula alterado",
+        message=(
+            f"A aula em {schedule.room.name} "
             f"agora está {status}."
         ),
     )
@@ -723,13 +788,19 @@ def update_schedule_status(schedule_id):
 @jwt_required()
 def cancel_schedule(schedule_id):
     user = current_user()
+    owner_id = current_owner_id(user)
 
-    if user is None or not user.active:
+    if (
+        user is None
+        or not user.active
+        or owner_id is None
+    ):
         return invalid_session_response()
 
-    schedule = find_in_school(
+    schedule = find_for_owner(
         Schedule,
         schedule_id,
+        owner_id,
     )
 
     if schedule is None:
@@ -742,49 +813,43 @@ def cancel_schedule(schedule_id):
         and schedule.teacher_id != user.id
     ):
         return jsonify(
-            error="Você não pode cancelar esta aula."
+            error="Você não pode remover este agendamento."
         ), 403
 
-    schedule.status = "CANCELADA"
-    schedule.cancelled_by_id = user.id
-    schedule.cancelled_at = datetime.now(
-        timezone.utc
-    )
+    removed_schedule_id = schedule.id
+    teacher_id = schedule.teacher_id
+    room_name = schedule.room.name
+    teacher_name = schedule.teacher.name
 
     if user.role == "PROFESSOR":
-        admins = db.session.scalars(
-            db.select(User).where(
-                User.school_id == user.school_id,
-                User.role == "ADMIN",
-                User.active.is_(True),
-            )
-        ).all()
-
-        for admin in admins:
-            notify(
-                admin.id,
-                "Aula cancelada",
-                (
-                    f"{user.name} cancelou a aula na sala "
-                    f"{schedule.room.name}."
-                ),
-            )
-
-    elif schedule.teacher_id != user.id:
         notify(
-            schedule.teacher_id,
-            "Aula cancelada",
-            (
-                f"A aula na sala {schedule.room.name} "
-                "foi cancelada pelo administrador."
+            owner_id=owner_id,
+            user_id=owner_id,
+            title="Agendamento removido",
+            message=(
+                f"{teacher_name} desagendou a aula "
+                f"na sala {room_name}."
             ),
         )
 
+    elif teacher_id != user.id:
+        notify(
+            owner_id=owner_id,
+            user_id=teacher_id,
+            title="Agendamento removido",
+            message=(
+                f"O administrador removeu seu "
+                f"agendamento na sala {room_name}."
+            ),
+        )
+
+    db.session.delete(schedule)
     db.session.commit()
 
     return jsonify(
-        schedule=schedule.to_dict()
-    )
+        message="Agendamento removido com sucesso.",
+        scheduleId=removed_schedule_id,
+    ), 200
 
 
 # =========================================================
@@ -795,17 +860,24 @@ def cancel_schedule(schedule_id):
 @jwt_required()
 def list_notifications():
     user = current_user()
+    owner_id = current_owner_id(user)
 
-    if user is None or not user.active:
+    if (
+        user is None
+        or not user.active
+        or owner_id is None
+    ):
         return invalid_session_response()
 
     items = db.session.scalars(
         db.select(Notification)
         .where(
-            Notification.school_id == user.school_id,
+            Notification.father_id == owner_id,
             Notification.user_id == user.id,
         )
-        .order_by(Notification.created_at.desc())
+        .order_by(
+            Notification.created_at.desc()
+        )
         .limit(50)
     ).all()
 
@@ -813,7 +885,7 @@ def list_notifications():
         db.select(
             func.count(Notification.id)
         ).where(
-            Notification.school_id == user.school_id,
+            Notification.father_id == owner_id,
             Notification.user_id == user.id,
             Notification.read.is_(False),
         )
@@ -831,14 +903,19 @@ def list_notifications():
 @jwt_required()
 def read_notification(notification_id):
     user = current_user()
+    owner_id = current_owner_id(user)
 
-    if user is None or not user.active:
+    if (
+        user is None
+        or not user.active
+        or owner_id is None
+    ):
         return invalid_session_response()
 
     notification = db.session.scalar(
         db.select(Notification).where(
             Notification.id == notification_id,
-            Notification.school_id == user.school_id,
+            Notification.father_id == owner_id,
             Notification.user_id == user.id,
         )
     )
