@@ -80,6 +80,33 @@ class User(db.Model):
         default=True,
     )
 
+    email_verified = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    verification_code_hash = db.Column(
+        db.String(255),
+        nullable=True,
+    )
+
+    verification_expires_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=True,
+    )
+
+    verification_attempts = db.Column(
+        db.Integer,
+        nullable=False,
+        default=0,
+    )
+
+    verification_last_sent_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=True,
+    )
+
     created_at = db.Column(
         db.DateTime(timezone=True),
         nullable=False,
@@ -151,6 +178,7 @@ class User(db.Model):
             "subject": self.subject,
             "shift": self.shift,
             "active": self.active,
+            "emailVerified": self.email_verified,
             "createdAt": (
                 self.created_at.isoformat()
                 if self.created_at
