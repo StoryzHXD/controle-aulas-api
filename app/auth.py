@@ -215,9 +215,10 @@ def bootstrap_admin():
     except Exception:
         email_sent = False
 
-        # Permite tentar reenviar imediatamente,
-        # pois o primeiro envio não aconteceu.
+        # Como o envio falhou, o usuário
+        # poderá tentar reenviar imediatamente.
         user.verification_last_sent_at = None
+
         db.session.commit()
 
         current_app.logger.exception(
@@ -456,9 +457,10 @@ def resend_verification():
             code=code,
         )
     except Exception:
-        # O envio falhou, portanto não devemos
-        # aplicar o intervalo de 60 segundos.
+        # Não aplica o intervalo de reenvio
+        # quando a mensagem não foi enviada.
         user.verification_last_sent_at = None
+
         db.session.commit()
 
         current_app.logger.exception(
@@ -470,7 +472,7 @@ def resend_verification():
         return jsonify(
             error=(
                 "Não foi possível enviar o código. "
-                "Verifique a configuração do Gmail."
+                "Verifique a configuração do Brevo."
             )
         ), 503
 
