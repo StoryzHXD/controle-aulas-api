@@ -823,6 +823,7 @@ def list_schedules(room_id):
         .where(
             Schedule.father_id == owner_id,
             Schedule.room_id == room.id,
+            Schedule.status != "CANCELADA",
             Schedule.class_date.between(
                 start,
                 end,
@@ -974,29 +975,40 @@ def create_schedule(room_id):
             Schedule.father_id == owner_id,
             Schedule.room_id == room.id,
             Schedule.class_date == class_date,
-            Schedule.lesson_number
-            == lesson_number,
-            Schedule.status
-            != "CANCELADA",
+            Schedule.lesson_number == lesson_number,
         )
     )
 
-    if existing_schedule is not None:
+    if (
+        existing_schedule is not None
+        and existing_schedule.status != "CANCELADA"
+    ):
         return jsonify(
-            error=(
-                "Essa aula já está ocupada."
-            )
+            error="Essa aula já está ocupada."
         ), 409
 
-    schedule = Schedule(
-        father_id=owner_id,
-        room_id=room.id,
-        teacher_id=user.id,
-        class_date=class_date,
-        lesson_number=lesson_number,
-        class_time=class_time,
-        status="AGENDADA",
+    if existing_schedule is not None:
+        # Reaproveita registros CANCELADA criados pela versão antiga.
+        # Isso evita conflito com a restrição única do PostgreSQL.
+        schedule = existing_schedule
+        schedule.teacher_id = user.id
+        schedule.class_time = class_time
+        schedule.status = "AGENDADA"
+        schedule.cancelled_by_id = None
+        schedule.cancelled_at = None
+        schedule.created_at = datetime.now(
+        timezone.utc
     )
+    else:
+        schedule = Schedule(
+            father_id=owner_id,
+            room_id=room.id,
+            teacher_id=user.id,
+            class_date=class_date,
+            lesson_number=lesson_number,
+            class_time=class_time,
+            status="AGENDADA",
+     )
 
     db.session.add(schedule)
 
@@ -1061,6 +1073,14 @@ def update_schedule_status(schedule_id):
         return jsonify(
             error="Status inválido."
         ), 400
+
+    if status == "CANCELADA":
+            return jsonify(
+                error=(
+                    "Para remover um agendamento, "
+                    "use a ação Remover."
+                )
+            ), 400
 
     if schedule.status == "CANCELADA":
         return jsonify(
@@ -1131,33 +1151,21 @@ def cancel_schedule(schedule_id):
     ):
         return jsonify(
             error=(
-                "Você não pode cancelar "
-                "esta aula."
+                "Você não pode remover "
+                "este agendamento."
             )
         ), 403
 
-    if schedule.status == "CANCELADA":
-        return jsonify(
-            schedule=schedule.to_dict(),
-            message=(
-                "O agendamento já estava cancelado."
-            ),
-        ), 200
-
-    schedule.status = "CANCELADA"
-    schedule.cancelled_by_id = user.id
-
-    schedule.cancelled_at = datetime.now(
-        timezone.utc
-    )
+    # Salva os dados antes de excluir o objeto.
+    schedule_data = schedule.to_dict()
 
     if user.role == "ADMIN":
         notify(
             owner_id=owner_id,
             user_id=schedule.teacher_id,
-            title="Aula cancelada",
+            title="Aula removida",
             message=(
-                f"O administrador cancelou "
+                f"O administrador removeu "
                 f"sua aula em "
                 f"{schedule.room.name}."
             ),
@@ -1174,12 +1182,14 @@ def cancel_schedule(schedule_id):
             ),
         )
 
+    # Exclui realmente o registro e libera a restrição única.
+    db.session.delete(schedule)
     db.session.commit()
 
     return jsonify(
-        schedule=schedule.to_dict()
-    )
-
+        schedule=schedule_data,
+        message="Agendamento removido com sucesso."
+    ), 200
 
 # =========================================================
 # NOTIFICAÇÕES
