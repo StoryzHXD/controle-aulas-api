@@ -150,6 +150,7 @@ class User(db.Model):
         cascade="all, delete-orphan",
         lazy=True,
     )
+    
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(
@@ -429,7 +430,90 @@ class Schedule(db.Model):
             ),
         }
 
+class Occurrence(db.Model):
+    __tablename__ = "occurrences"
 
+    id = db.Column(
+        db.Integer,
+        primary_key=True,
+    )
+
+    # Administrador/escola responsável pelos dados.
+    father_id = db.Column(
+        db.Integer,
+        db.ForeignKey(
+            "users.id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+    )
+
+    # Professor que registrou a ocorrência.
+    teacher_id = db.Column(
+        db.Integer,
+        db.ForeignKey(
+            "users.id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+    )
+
+    student_name = db.Column(
+        db.String(150),
+        nullable=False,
+    )
+
+    # String para preservar zeros à esquerda.
+    student_ra = db.Column(
+        db.String(50),
+        nullable=False,
+        index=True,
+    )
+
+    reason = db.Column(
+        db.Text,
+        nullable=False,
+    )
+
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+        index=True,
+    )
+
+    owner = db.relationship(
+        "User",
+        foreign_keys=[father_id],
+    )
+
+    teacher = db.relationship(
+        "User",
+        foreign_keys=[teacher_id],
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "fatherId": self.father_id,
+            "teacherId": self.teacher_id,
+            "teacherName": (
+                self.teacher.name
+                if self.teacher
+                else None
+            ),
+            "studentName": self.student_name,
+            "studentRa": self.student_ra,
+            "reason": self.reason,
+            "createdAt": (
+                self.created_at.isoformat()
+                if self.created_at
+                else None
+            ),
+        }
+    
 class Notification(db.Model):
     __tablename__ = "notifications"
 

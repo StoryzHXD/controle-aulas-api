@@ -38,3 +38,110 @@ def test_v2_flow(client):
                         json={"status": "CONFIRMADA"}).status_code == 200
     assert client.delete(f"/api/schedules/{schedule_id}", headers=bearer(teacher_token)).get_json()["schedule"]["status"] == "CANCELADA"
     assert client.get("/api/notifications", headers=bearer(admin)).status_code == 200
+
+def test_occurrence_flow(client):
+    bootstrap = client.post(
+        "/api/auth/bootstrap",
+        json={
+            "name": "Administrador",
+            "email": "admin@escola.com",
+            "password": "admin1234",
+        },
+    )
+
+    assert bootstrap.status_code == 201
+
+    admin_token = login(
+        client,
+        "admin@escola.com",
+        "admin1234",
+    )
+
+    teacher_response = client.post(
+        "/api/teachers",
+        headers=bearer(admin_token),
+        json={
+            "name": "Professor Teste",
+            "email": "professor@escola.com",
+            "password": "prof1234",
+            "subject": "Matemática",
+            "shift": "MANHA",
+        },
+    )
+
+    assert teacher_response.status_code == 201
+
+    teacher_token = login(
+        client,
+        "professor@escola.com",
+        "prof1234",
+    )
+
+    created = client.post(
+        "/api/occurrences",
+        headers=bearer(teacher_token),
+        json={
+            "studentName": "Aluno Teste",
+            "studentRa": "00012345",
+            "reason": (
+                "Não entregou a atividade."
+            ),
+        },
+    )
+
+    assert created.status_code == 201
+
+    occurrence = created.get_json()[
+        "occurrence"
+    ]
+
+    assert occurrence[
+        "studentName"
+    ] == "Aluno Teste"
+
+    assert occurrence[
+        "studentRa"
+    ] == "00012345"
+
+    assert occurrence[
+        "teacherName"
+    ] == "Professor Teste"
+
+    occurrence_id = occurrence["id"]
+
+    teacher_list = client.get(
+        "/api/occurrences",
+        headers=bearer(teacher_token),
+    )
+
+    assert teacher_list.status_code == 403
+
+    admin_list = client.get(
+        "/api/occurrences",
+        headers=bearer(admin_token),
+    )
+
+    assert admin_list.status_code == 200
+    assert admin_list.get_json()["count"] == 1
+
+    details = client.get(
+        f"/api/occurrences/{occurrence_id}",
+        headers=bearer(admin_token),
+    )
+
+    assert details.status_code == 200
+
+    finished = client.delete(
+        f"/api/occurrences/{occurrence_id}",
+        headers=bearer(admin_token),
+    )
+
+    assert finished.status_code == 200
+
+    empty_list = client.get(
+        "/api/occurrences",
+        headers=bearer(admin_token),
+    )
+
+    assert empty_list.status_code == 200
+    assert empty_list.get_json()["items"] == []

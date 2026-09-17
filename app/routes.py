@@ -19,6 +19,7 @@ from .email_service import send_verification_email
 from .extensions import db
 from .models import (
     Notification,
+    Occurrence,
     Room,
     Schedule,
     User,
@@ -1189,6 +1190,230 @@ def cancel_schedule(schedule_id):
     return jsonify(
         schedule=schedule_data,
         message="Agendamento removido com sucesso."
+    ), 200
+
+
+# =========================================================
+# OCORRÊNCIAS
+# =========================================================
+
+@api_bp.post("/occurrences")
+@jwt_required()
+def create_occurrence():
+    user = current_user()
+    owner_id = current_owner_id(user)
+
+    if (
+        user is None
+        or not user.active
+        or not user.email_verified
+        or owner_id is None
+    ):
+        return invalid_session_response()
+
+    if user.role != "PROFESSOR":
+        return jsonify(
+            error=(
+                "Somente professores podem "
+                "registrar ocorrências."
+            )
+        ), 403
+
+    data = request.get_json(silent=True) or {}
+
+    student_name = str(
+        data.get("studentName", "")
+    ).strip()
+
+    student_ra = str(
+        data.get("studentRa", "")
+    ).strip()
+
+    reason = str(
+        data.get("reason", "")
+    ).strip()
+
+    if not student_name:
+        return jsonify(
+            error=(
+                "O nome completo do aluno "
+                "é obrigatório."
+            )
+        ), 400
+
+    if len(student_name) < 3:
+        return jsonify(
+            error=(
+                "O nome do aluno deve possuir "
+                "pelo menos 3 caracteres."
+            )
+        ), 400
+
+    if len(student_name) > 150:
+        return jsonify(
+            error=(
+                "O nome do aluno deve possuir "
+                "no máximo 150 caracteres."
+            )
+        ), 400
+
+    if not student_ra:
+        return jsonify(
+            error="O RA do aluno é obrigatório."
+        ), 400
+
+    if len(student_ra) > 50:
+        return jsonify(
+            error=(
+                "O RA deve possuir no máximo "
+                "50 caracteres."
+            )
+        ), 400
+
+    if not reason:
+        return jsonify(
+            error=(
+                "O motivo da ocorrência "
+                "é obrigatório."
+            )
+        ), 400
+
+    if len(reason) < 3:
+        return jsonify(
+            error=(
+                "O motivo deve possuir pelo "
+                "menos 3 caracteres."
+            )
+        ), 400
+
+    if len(reason) > 2000:
+        return jsonify(
+            error=(
+                "O motivo deve possuir no "
+                "máximo 2000 caracteres."
+            )
+        ), 400
+
+    occurrence = Occurrence(
+        father_id=owner_id,
+        teacher_id=user.id,
+        student_name=student_name,
+        student_ra=student_ra,
+        reason=reason,
+    )
+
+    db.session.add(occurrence)
+    db.session.commit()
+
+    return jsonify(
+        occurrence=occurrence.to_dict(),
+        message=(
+            "Ocorrência registrada "
+            "com sucesso."
+        ),
+    ), 201
+
+
+@api_bp.get("/occurrences")
+@admin_required
+def list_occurrences():
+    admin = current_user()
+
+    if (
+        admin is None
+        or not admin.active
+        or not admin.email_verified
+    ):
+        return invalid_session_response()
+
+    occurrences = db.session.scalars(
+        db.select(Occurrence)
+        .where(
+            Occurrence.father_id == admin.id
+        )
+        .order_by(
+            Occurrence.created_at.desc(),
+            Occurrence.id.desc(),
+        )
+    ).all()
+
+    return jsonify(
+        items=[
+            occurrence.to_dict()
+            for occurrence in occurrences
+        ],
+        count=len(occurrences),
+    )
+
+
+@api_bp.get(
+    "/occurrences/<int:occurrence_id>"
+)
+@admin_required
+def get_occurrence(occurrence_id):
+    admin = current_user()
+
+    if (
+        admin is None
+        or not admin.active
+        or not admin.email_verified
+    ):
+        return invalid_session_response()
+
+    occurrence = db.session.scalar(
+        db.select(Occurrence).where(
+            Occurrence.id == occurrence_id,
+            Occurrence.father_id == admin.id,
+        )
+    )
+
+    if occurrence is None:
+        return jsonify(
+            error="Ocorrência não encontrada."
+        ), 404
+
+    return jsonify(
+        occurrence=occurrence.to_dict()
+    )
+
+
+@api_bp.delete(
+    "/occurrences/<int:occurrence_id>"
+)
+@admin_required
+def finish_occurrence(occurrence_id):
+    admin = current_user()
+
+    if (
+        admin is None
+        or not admin.active
+        or not admin.email_verified
+    ):
+        return invalid_session_response()
+
+    occurrence = db.session.scalar(
+        db.select(Occurrence).where(
+            Occurrence.id == occurrence_id,
+            Occurrence.father_id == admin.id,
+        )
+    )
+
+    if occurrence is None:
+        return jsonify(
+            error="Ocorrência não encontrada."
+        ), 404
+
+    occurrence_data = occurrence.to_dict()
+
+    db.session.delete(occurrence)
+    db.session.commit()
+
+    return jsonify(
+        occurrence=occurrence_data,
+        message=(
+            "Ocorrência finalizada "
+            "com sucesso."
+        ),
     ), 200
 
 # =========================================================
